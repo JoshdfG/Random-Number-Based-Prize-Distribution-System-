@@ -1,237 +1,275 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.2;
+pragma solidity ^0.8.9;
 
-error ZERO_ADDRESS_NOT_ALLOWED();
-error YOU_HAVE_ALREADY_REGISTERED();
-error AIRDROP_HAS_ENDED();
-error YOU_HAVE_ALREADY_FOLLOWED();
-error YOU_HAVE_ALREADY_LIKED();
-error YOU_HAVE_ALREADY_MADE_A_POST();
-
-import "@openzeppelin/contracts/utils/Strings.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
-import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {VRFCoordinatorV2Interface} from "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import {VRFConsumerBaseV2} from "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
 
-contract AirdropDistribution is VRFConsumerBaseV2 {
-    IERC20 tokenA;
-    event RequestSent(uint256 requestId, uint32 numWords);
-    event RequestFulfilled(uint256 requestId, uint256[] randomWords);
+//custom errors
+error ZERO_ADDRESS_NOT_ALLOWED();
+error CANNOT_REGISTER_AGAIN();
+error ONLY_REGISTERED_USER_IS_ALLOWED();
+error AIRDROP_DISTRIBUTION_HAS_ENDED();
+error ALREADY_FOLLOWED_OUR_PAGE();
+error ALREADY_LIKED_OUR_POST();
+error ALREADY_SHARED_OUR_POST();
+error USER_ENTRY_POINT_REACHED();
 
-    struct RequestStatus {
-        bool fulfilled;
-        bool exists;
-        uint256[] randomWords;
-    }
-    mapping(uint256 => RequestStatus)
-        public s_requests; /* requestId --> requestStatus */
-
+contract MetaBeyond is VRFConsumerBaseV2 {
+    //VRF co-ordinator
     VRFCoordinatorV2Interface COORDINATOR;
 
-    // Your subscription ID.
-    uint64 s_subscriptionId;
+    IERC20 public metaToken;
 
-    // past requests Id.
-    uint256[] public requestIds;
-    uint256 public lastRequestId;
-
-    bytes32 immutable keyHash;
-    address public immutable linkToken;
-
-    uint32 callbackGasLimit = 150000;
-
-    uint16 requestConfirmations = 3;
-    uint32 numWords = 1;
-    uint256 public randomWordsNum;
-
-    uint256[] participantsId;
-    address[] participantsAddress;
-
-    constructor(
-        uint64 subscriptionId,
-        address _linkToken,
-        address _tokenA
-    ) VRFConsumerBaseV2(0x2Ca8E0C643bDe4C2E08ab1fA0da3401AdAD7734D) {
-        COORDINATOR = VRFCoordinatorV2Interface(
-            0x2Ca8E0C643bDe4C2E08ab1fA0da3401AdAD7734D
-        );
-        s_subscriptionId = subscriptionId;
-
-        keyHash = 0x79d3d8832d904592c0bf9818b621522c988bb8b0c05cdc3b15aea1b6e8db0c15; // we alread set this
-        linkToken = _linkToken;
-        tokenA = IERC20(_tokenA);
+    struct Users {
+        uint256 id;
+        address userAddress;
+        bool hasFollowed;
+        bool hasPosted;
+        bool hasLiked;
+        uint256 userPoints;
+        bool hasRegistered;
+        bool entryPointReach;
     }
 
-    //
+    uint256 userId;
+
+    address[] winners;
 
     bool hasAirdropEnded;
 
-    struct User {
-        uint256 id;
-        address userAddress;
-        bool hasLiked;
-        uint8 userPoints;
-        bool hasPosted;
-        bool hasFollowed;
-        bool hasRegistered;
-        bool entryPointReached;
+    uint8 constant pointforFollow = 20;
+    uint8 constant pointforLike = 10;
+    uint8 constant pointForPostSharing = 30;
+
+    mapping(address => Users) registeredUsers;
+
+    //subscription Id from the VRF
+    uint64 subscriptionId;
+
+    // Array to store past request IDs
+    uint256[] public requestIds;
+    // ID of the last request made for randomness
+    uint256 public lastRequestId;
+
+    // Key hash used for Chainlink VRF
+    bytes32 keyHash =
+        0x474e34a077df58807dbe9c96d3c009b23b3c6d0cce433e59bbf5b34f823bc56c;
+
+    // Number of confirmations required for a randomness request
+    uint16 requestConfirmations;
+
+    uint32 numWords = 5; // Number of random words to be generated
+    uint32 callbackGasLimit = 400000;
+
+    struct RequestStatus {
+        bool fulfilled; // Whether the request has been successfully fulfilled
+        bool exists; // Whether a requestId exists
+        uint256[] randomWords; // Array to store the generated random words
     }
 
-    mapping(address => User) public userData;
+    mapping(uint => RequestStatus) requests;
 
-    uint[] winners;
-    uint userID;
+    constructor(
+        uint64 _subscriptionId,
+        address _metaToken
+    ) VRFConsumerBaseV2(0x8103B0A8A00be2DDC778e6e7eaa21791Cd364625) {
+        metaToken = IERC20(_metaToken);
 
-    uint8 constant followPoints = 10;
-    uint8 constant likePoints = 10;
-    uint8 constant sharedPostPoint = 30;
+        COORDINATOR = VRFCoordinatorV2Interface(
+            0x8103B0A8A00be2DDC778e6e7eaa21791Cd364625
+        );
+        subscriptionId = _subscriptionId;
+    }
 
+    //events
+    event UserRegistered(uint256 id, address userAdress);
+    event UserFollowed(uint256 id, address userAdress);
+    event UserLiked(uint256 id, address userAdress);
+    event UserShared(uint256 id, address userAdress);
+    event UserEntryPointReached(uint256 id, address userAdress);
+    event DistributionSuccessful(address userAdress, uint256 amount);
+
+    //registrations
     function register() external {
-        doesUserExists();
         if (hasAirdropEnded) {
-            revert AIRDROP_HAS_ENDED();
+            revert AIRDROP_DISTRIBUTION_HAS_ENDED();
         }
         if (msg.sender == address(0)) {
             revert ZERO_ADDRESS_NOT_ALLOWED();
         }
 
-        if (userData[msg.sender].hasRegistered == true) {
-            revert YOU_HAVE_ALREADY_REGISTERED();
+        if (registeredUsers[msg.sender].hasRegistered == true) {
+            revert CANNOT_REGISTER_AGAIN();
         }
 
-        uint256 id = userID + 1;
-        userData[msg.sender] = User(
+        uint256 id = userId + 1;
+
+        registeredUsers[msg.sender] = Users(
             id,
             msg.sender,
             false,
+            false,
+            false,
             0,
-            false,
-            false,
-            false,
+            true,
             false
         );
 
-        userID = id + userID;
+        userId = id + userId;
+
+        emit UserRegistered(id, msg.sender);
     }
 
-    function doesUserExists() private view {
-        if (userData[msg.sender].hasRegistered == true) {
-            revert YOU_HAVE_ALREADY_REGISTERED();
-        }
-    }
-
+    //follow our page
     function followUs() external {
         if (msg.sender == address(0)) {
             revert ZERO_ADDRESS_NOT_ALLOWED();
         }
 
-        doesUserExists();
+        doesUserExist();
 
-        if (userData[msg.sender].hasFollowed == true) {
-            revert YOU_HAVE_ALREADY_FOLLOWED();
+        if (registeredUsers[msg.sender].hasFollowed) {
+            revert ALREADY_FOLLOWED_OUR_PAGE();
         }
 
-        userData[msg.sender].hasFollowed = true;
+        registeredUsers[msg.sender].hasFollowed = true;
 
-        userData[msg.sender].userPoints =
-            userData[msg.sender].userPoints +
-            followPoints;
+        registeredUsers[msg.sender].userPoints =
+            registeredUsers[msg.sender].userPoints +
+            pointforFollow;
 
-        checkAndUpdateEntryPoint();
+        updateEntryPoints();
+
+        emit UserFollowed(registeredUsers[msg.sender].id, msg.sender);
     }
 
-    function posted() external {
+    //like our pinned post
+    function likeOurPinnedPost() external {
         if (msg.sender == address(0)) {
             revert ZERO_ADDRESS_NOT_ALLOWED();
         }
 
-        doesUserExists();
+        doesUserExist();
 
-        if (userData[msg.sender].hasPosted == true) {
-            revert YOU_HAVE_ALREADY_MADE_A_POST();
+        if (registeredUsers[msg.sender].hasLiked) {
+            revert ALREADY_LIKED_OUR_POST();
         }
 
-        userData[msg.sender].hasPosted = true;
+        registeredUsers[msg.sender].hasLiked = true;
 
-        userData[msg.sender].userPoints =
-            userData[msg.sender].userPoints +
-            sharedPostPoint;
+        registeredUsers[msg.sender].userPoints =
+            registeredUsers[msg.sender].userPoints +
+            pointforLike;
 
-        checkAndUpdateEntryPoint();
+        updateEntryPoints();
+
+        emit UserLiked(registeredUsers[msg.sender].id, msg.sender);
     }
 
-    function likedPinnedPosts() external {
+    //share our pinned post
+    function sharePinnedPost() external {
         if (msg.sender == address(0)) {
             revert ZERO_ADDRESS_NOT_ALLOWED();
         }
 
-        doesUserExists();
+        doesUserExist();
 
-        if (userData[msg.sender].hasLiked = true) {
-            revert YOU_HAVE_ALREADY_LIKED();
+        if (registeredUsers[msg.sender].hasPosted) {
+            revert ALREADY_SHARED_OUR_POST();
         }
 
-        userData[msg.sender].hasLiked = true;
+        registeredUsers[msg.sender].hasPosted = true;
 
-        userData[msg.sender].userPoints =
-            userData[msg.sender].userPoints +
-            likePoints;
+        registeredUsers[msg.sender].userPoints =
+            registeredUsers[msg.sender].userPoints +
+            pointForPostSharing;
 
-        checkAndUpdateEntryPoint();
+        updateEntryPoints();
+
+        emit UserShared(registeredUsers[msg.sender].id, msg.sender);
     }
 
-    function checkAndUpdateEntryPoint() private {
-        if (userData[msg.sender].entryPointReached == false) {
-            if (userData[msg.sender].userPoints == 50) {
-                userData[msg.sender].entryPointReached = true;
+    //users entry point update
+    function updateEntryPoints() private {
+        if (registeredUsers[msg.sender].entryPointReach == false) {
+            if (registeredUsers[msg.sender].userPoints == 50) {
+                registeredUsers[msg.sender].entryPointReach = true;
 
-                winners.push(userData[msg.sender].id);
+                //inserting the address of users with 50 points or more in the 'winners' array
+                winners.push(registeredUsers[msg.sender].userAddress);
+
+                //check whether the defined number of winners have been reached, if yes? Get random winners
+                checkAndGetRandomWinners();
             }
+        } else {
+            revert USER_ENTRY_POINT_REACHED();
         }
+
+        emit UserEntryPointReached(registeredUsers[msg.sender].id, msg.sender);
     }
 
-    function distributeAirdrop() private {
+    //airdrop distribution method
+    function checkAndGetRandomWinners() private {
         if (winners.length == 20) {
-            hasAirdropEnded = true;
+            getRequestId();
         }
     }
 
-    function requestRandomWords() public returns (uint256 requestId) {
+    //getting the request id
+    function getRequestId() private returns (uint256 requestId) {
+        // chainlink vrf
         requestId = COORDINATOR.requestRandomWords(
             keyHash,
-            s_subscriptionId,
+            subscriptionId,
             requestConfirmations,
             callbackGasLimit,
             numWords
         );
-        s_requests[requestId] = RequestStatus({
-            randomWords: new uint256[](0),
-            exists: true,
-            fulfilled: false
-        });
+
+        RequestStatus storage requestStatus = requests[requestId];
+        requestStatus.exists = true;
+
         requestIds.push(requestId);
         lastRequestId = requestId;
-        emit RequestSent(requestId, numWords);
-        return requestId; // requestID is a uint.
+
+        return requestId;
     }
 
+    //to be called when the request id is retrieved
     function fulfillRandomWords(
         uint256 _requestId,
         uint256[] memory _randomWords
     ) internal override {
-        require(s_requests[_requestId].exists, "request not found");
-        s_requests[_requestId].fulfilled = true;
-        s_requests[_requestId].randomWords = _randomWords;
-        randomWordsNum = _randomWords[0]; // Set array-index to variable
-        emit RequestFulfilled(_requestId, _randomWords);
+        require(requests[_requestId].exists, "Request not found");
+
+        requests[_requestId].fulfilled = true;
+        requests[_requestId].randomWords = _randomWords;
+
+        shareAirdrop(_requestId);
     }
 
-    // to check the request status of random number call.
-    function getRequestStatus(
-        uint256 _requestId
-    ) external view returns (bool fulfilled, uint256[] memory randomWords) {
-        require(s_requests[_requestId].exists, "request not found");
-        RequestStatus memory request = s_requests[_requestId];
-        return (request.fulfilled, request.randomWords);
+    //after the random words are generated, the airdrop is distributed to the randomly chosen winners. Picked (randomly) Winners will recieve the airdrop, the rest of the airdrop (the token) is sent to this contract
+    function shareAirdrop(uint256 _requestId) private {
+        for (uint256 i = 0; i < numWords; i++) {
+            uint256 index = (requests[_requestId].randomWords[i] + i) %
+                winners.length;
+
+            uint amount = registeredUsers[winners[index]].userPoints * 10;
+
+            metaToken.transfer(winners[index], amount);
+
+            emit DistributionSuccessful(winners[index], amount);
+        }
+
+        //after distribution the airdrop ends
+        hasAirdropEnded = true;
+    }
+
+    //check whether user is registered
+    function doesUserExist() private view {
+        if (registeredUsers[msg.sender].hasRegistered == false) {
+            revert ONLY_REGISTERED_USER_IS_ALLOWED();
+        }
     }
 }
